@@ -1,0 +1,224 @@
+            +----------------------+
+            |        OS 211        |
+            |  TASK 1: SCHEDULING  |
+            |    DESIGN DOCUMENT   |
+            +----------------------+
+                   
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Shiyuan Feng <shiyuan.feng18@imperial.ac.uk>
+Hongyuan Yan <hongyuan.yan18@imperial.ac.uk>
+Manshu Wang <manshu.wang18@imperial.ac.uk>
+Zhige Yu <zhige.yu18@imperial.ac.uk>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, or notes for the
+>> markers, please give them here.
+
+>> Please cite any offline or online sources you consulted while preparing your 
+>> submission, other than the Pintos documentation, course text, lecture notes 
+>> and course staff.
+
+             PRIORITY SCHEDULING
+             ===================
+
+---- DATA STRUCTURES ----
+
+>> A1: (2 marks) 
+>> Copy here the declaration of each new or changed `struct' or `struct' member,
+>> global or static variable, `typedef', or enumeration.  
+>> Identify the purpose of each in roughly 25 words.
+
+In synch.h:
+struct lock
+  {
+    ...
+    struct list_elem elem;      // List element of the lock, so that the lock can be added
+                                // to a list.
+  };
+
+In thread.h:
+struct thread
+  {
+    ...
+    int base_priority;                  // The base priority of a thread before any priority donation.
+    ...
+    struct lock *waiting_for_this_lock; // The lock which the thread is waiting for.
+    struct list holding_lock_list;      // List of locks which the thread is holding.
+    ...
+  };
+
+>> A2: (4 marks) 
+>> Draw a diagram that illustrates a nested donation in your structure and 
+>> briefly explain how this works.
+   ________                                  ________                                  ________
+  |        |                                |        |                                |        |
+  |  C:10  |==owner=>[LOCK_1]<--waiting_for-|  B:30  |==owner=>[LOCK_2]<--waiting_for-|  A:50  |
+  |________|                                |________|                                |________|
+
+Suppose there are three threads, A, B, and C. If A is waiting for a lock
+held by B, and B is waiting for a lock held by C, but the order of their
+priorities is A > B > C. Now a single donation is not enough and we need
+to increase the priorities of both B and C to the priority of A, so that
+the next_thread_to_run would be the thread of the highest priority. So now
+thread C has the highest priority and can be scheduled. To that end, we wrote
+a nested_donate function. It makes the current thread to donate its
+priority to the owner thread, t, of the lock that the current thread is acquiring,
+then it looks up the lock which t is waiting for, donates its priority to that
+lock's owner, until the current donee has no lock to wait for.
+
+---- ALGORITHMS ----
+
+>> A3: (3 marks) 
+>> How do you ensure that the highest priority waiting thread wakes up first for
+>> a (i) lock, (ii) semaphore, or (iii) condition variable?
+(i) The lock chooses the next holder using the waiting list in its semaphore.
+Because the semaphore provides the waiting thread with the highest priority,
+the lock also wakes up the thread with the highest priority in the waiting list.
+(ii) In the function sema_up (struct semaphore *sema), the highest priority
+waiting thread is chosen to be woken up by calling the
+list_max(&sema->waiters, thread_priority_compare, NULL)) function on the waiting list.
+(iii) In the function cond_signal (struct condition *cond, struct lock *lock UNUSED),
+the highest priority waiting thread is chosen by calling the
+list_max(&cond->waiters, sema_elem_compare, NULL) function. By obtaining the
+semaphores in a condition's waiting list, where each semaphore has only one
+thread waiter, this function can choose the thread with the highest priority
+from all these semaphores' thread waiters.
+
+>> A4: (3 marks)
+>> Describe the sequence of events when a call to lock_acquire() causes a
+>> priority donation.
+>> How is nested donation handled?
+When the current thread acquires the lock, we set the lock it is waiting for
+to the lock which is passed into the lock_acquire() function as a parameter.
+When the priority of a lock holder is smaller than the priority of the thread
+which is waiting for this lock, we need to donate the higher priority to the
+lower thread to enable thread scheduling. When this happens to a series of
+more than two threads, we need nested donation. We pass two arguments to the
+nested_donate function: a pointer to the doner thread and a pointer to the
+lock. While the lock holder is not null, we keep checking whether the doner's
+priority is greater than the holder's. If not, we exit the while loop. Otherwise,
+we update the holder's priority to the doner's priority. And now we change the
+lock to the lock that the previous lock holder is waiting for if there is one,
+and update the holder as well. We iterate this process until the loop is exited.
+
+>> A5: (3 marks)
+>> Describe the sequence of events when lock_release() is called on a lock that
+>> a higher-priority thread is waiting for.
+When lock_release() is called, the lock element from the thread's holding_lock_list
+is removed. We first set the effective priority of the thread to be its base priority.
+Then we reset the priority of the thread. We go through the list of locks that
+the current thread is holding and check whether any thread in the waiting list of
+the lock is greater than the current effective priority. If it is, we update the
+priority. After going through all of the waiters of all locks, the new effective
+priority is set, and the lock holder becomes null. We finally call sema_up on the
+semaphore of the lock. We unblock the thread which has the highest priority among
+the waiters of the lock. Since lock_release() is called on a lock which a higher-
+priority thread is waiting for, that thread will be yielded in the end.
+
+---- SYNCHRONIZATION ----
+
+>> A6: (2 marks)
+>> How do you avoid a race condition in thread_set_priority() when a thread
+>> needs to recompute its effective priority, but the donated priorities
+>> potentially change during the computation?
+>> Can you use a lock to avoid the race?
+The possible cause for this race condition to happen is that when the thread t
+is traversing through its holding locks to get the maximum priority of its doners,
+a preemption occurs during thread_tick and the next thread to run creates a new
+thread with higher priority than t, and the new thread acquires t's lock. To avoid
+this race condition, interrupts are disabled before the traversal and re-enabled
+afterwards.
+
+---- RATIONALE ----
+
+>> A7: (3 marks)
+>> Why did you choose this design?
+>> In what ways is it superior to another design you considered?
+Another design we considered is to make each thread record its doner threads. However,
+when trying to implement in this way we ran into difficulties, because we need to
+carefully identify which doner of the current thread is responsible for which lock,
+when the thread is acquiring and releasing locks. Also, when releasing the lock, the
+current thread must pass its doner list to the next holder of the lock, which is inefficient.
+Hence the design we chose has more clarity and efficiency.
+
+              ADVANCED SCHEDULER
+              ==================
+
+---- DATA STRUCTURES ----
+
+>> B1: (2 marks)
+>> Copy here the declaration of each new or changed `struct' or `struct' member,
+>> global or static variable, `typedef', or enumeration. 
+>> Identify the purpose of each in roughly 25 words.
+
+In fixed-point.h:
+    typedef int32_t fp_t;   // This typedef represents fixed-point number. It is there for clarity.
+
+In thread.h:
+    struct thread {
+        ...
+        fp_t nice_fp;       // This member of struct thread stores the nice value of the thread in 
+                            // fixed-point format.
+        fp_t recent_cpu_fp; // This member of struct thread stores the recent_cpu value of the 
+                            // thread in fixed-point format.
+    };
+
+In thread.c: 
+    static struct list ready_queue[PRI_MAX + 1];  // 64 ready_queues for storing ready threads.
+                                                  // ready_queue[x] holds all threads with priority x.
+    static fp_t load_avg_fp;  // Static global variable for storing load_avg in fixed-point mode.
+
+---- ALGORITHMS ----
+
+>> B2: (3 marks)
+>> Suppose threads A, B, and C have nice values 0, 1, and 2 and each has a 
+>> recent_cpu value of 0. 
+>> Fill in the table below showing the scheduling decision, the priority and the
+>> recent_cpu values for each thread after each given number of timer ticks:
+
+timer  recent_cpu    priority   thread
+ticks   A   B   C   A   B   C   to run
+-----  --  --  --  --  --  --   ------
+ 0      0   0   0  63  61  59     A
+ 4      4   0   0  62  61  59     A
+ 8      8   0   0  61  61  59     B
+12      8   4   0  61  60  59     A
+16     12   4   0  60  60  59     B
+20     12   8   0  60  59  59     A
+24     16   8   0  59  59  59     C
+28     16   8   4  59  59  58     B
+32     16  12   4  59  58  58     A
+36     20  12   4  58  58  58     C
+
+>> B3: (2 marks) 
+>> Did any ambiguities in the scheduler specification make values in the table 
+>> uncertain? 
+>> If so, what rule did you use to resolve them?
+The specification does not say whether we should calculate recent_cpu or priority
+first.
+We decide to calculate recent_cpu first, and update priorities based on the new
+recent_cpu value.
+
+---- RATIONALE ----
+
+>> B4: (3 marks)
+>> Briefly critique your design, pointing out advantages and disadvantages in 
+>> your design choices.
+
+In fixed-point.h, we chose to implement the fixed-point calculation using macros instead of functions.
+As macros are preprocessed during compile time, it would have an improvement in efficiency compared to functions.
+Also, CLion interprets macros while the user is coding. Hence debugging macros would be much easier than functions
+when using CLion. (If there is an ASSERT that only involves macros, CLion will automatically grey-scale all codes
+after it upon an assertion failure. Hence we can check if a macro is behaving correctly without compiling test programs.)
+However, macros are not type-safe, and they are less readable compared with functions because we need to bracket
+everything up to avoid unforeseeable outcomes.
+
+We re-implemented ready_list using an array of ready_queues. Whenever a thread with priority X is ready, it is pushed
+to the back of ready_queue[X]. The next_thread_to_run would be the first thread in the non-empty priority queue with
+the highest possible index. This guarantees the "round-robin" scheduling order is working properly (When multiple
+threads have the same priority, they will be successively scheduled in each yield). Our design is efficient in terms
+of inserting and removing threads, but it takes more memory space.
